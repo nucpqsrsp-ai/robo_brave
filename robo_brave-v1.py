@@ -352,29 +352,30 @@ def sanitizar_dados(dados: dict) -> dict:
 # MÓDULO 3 — CONEXÃO COM O BRAVE
 # ─────────────────────────────────────────────────────────────
 def conectar_brave() -> webdriver.Chrome:
-    """
-    Conecta ao Brave já aberto com --remote-debugging-port=9222.
-    Usa webdriver.Chrome pois o Brave é baseado em Chromium.
-    O chromedriver precisa estar na mesma pasta do script (ou no PATH).
-    """
-    import os
+    import subprocess
+    from webdriver_manager.chrome import ChromeDriverManager
+    from webdriver_manager.core.os_manager import ChromeType
 
     options = Options()
     options.add_experimental_option("debuggerAddress", CONFIG["debug_port"])
-
-    # Informa ao Selenium onde está o executável do Brave
     options.binary_location = CONFIG["brave_path"]
 
-    # Localiza o chromedriver embutido pelo PyInstaller ou na pasta do script
-    if getattr(sys, "frozen", False):
-        base = sys._MEIPASS
-    else:
-        base = os.path.dirname(os.path.abspath(__file__))
-
-    driver_path = os.path.join(base, "chromedriver.exe")
-
+    # Detecta a versão do Brave instalada na máquina
     try:
-        service = Service(driver_path)
+        resultado = subprocess.run(
+            [CONFIG["brave_path"], "--version"],
+            capture_output=True, text=True, timeout=5
+        )
+        versao = resultado.stdout.strip()
+        log.info(f"Brave detectado: {versao}")
+    except Exception:
+        log.warning("Não foi possível detectar a versão do Brave — usando chromedriver padrão.")
+
+    # Baixa o chromedriver compatível automaticamente
+    try:
+        service = Service(
+            ChromeDriverManager(chrome_type=ChromeType.BRAVE).install()
+        )
         driver = webdriver.Chrome(service=service, options=options)
         log.info("Conectado ao Brave com sucesso.")
         return driver
