@@ -43,7 +43,7 @@ jobs:
           --collect-all selenium
           --collect-all pdfplumber
           --add-binary "chromedriver.exe;."
-          robo_automacao_v4.py
+          robo_brave-v1.py
 
       - name: Disponibilizar o .exe para download
         uses: actions/upload-artifact@v4
