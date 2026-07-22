@@ -42,7 +42,6 @@ jobs:
           --name "RoboFiscalizacao"
           --collect-all selenium
           --collect-all pdfplumber
-          # --add-binary "chromedriver.exe;."
           robo_brave-v1.py
 
       - name: Disponibilizar o .exe para download
