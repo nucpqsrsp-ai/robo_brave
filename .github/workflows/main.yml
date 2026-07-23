@@ -38,7 +38,7 @@ jobs:
       - name: Baixar o EdgeDriver
         shell: pwsh
         run: |
-          $url = "https://msedgedriver.azureedge.net/$env:EDGE_VERSION/edgedriver_win64.zip"
+          $url = "https://msedgedriver.microsoft.com/$env:EDGE_VERSION/edgedriver_win64.zip"
           Invoke-WebRequest -Uri $url -OutFile edgedriver.zip
           Expand-Archive -Path edgedriver.zip -DestinationPath . -Force
 
