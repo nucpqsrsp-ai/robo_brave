@@ -1,13 +1,17 @@
 name: Gerar Executável
+
 on:
   push:
     branches:
       - main
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: windows-latest
+
     steps:
       - name: Baixar o código
         uses: actions/checkout@v4
@@ -19,30 +23,20 @@ jobs:
 
       - name: Instalar dependências Python
         run: |
-          pip install pypdf "selenium>=4.10.0" pyperclip pyinstaller pdfplumber webdriver-manager
+          pip install pypdf selenium>=4.10.0 pyperclip pyinstaller pdfplumber
 
-      # Baixa o chromedriver compatível com a versão do Chrome instalada
-      # no runner windows-latest e o copia para a pasta do projeto
-      - name: Baixar chromedriver
+      # Baixar o EdgeDriver (versão fixa compatível com o Edge corporativo)
+      - name: Baixar o EdgeDriver
+        shell: pwsh
         run: |
-          python -c "
-          from selenium.webdriver.chrome.service import Service
-          from webdriver_manager.chrome import ChromeDriverManager
-          import shutil
-          path = ChromeDriverManager().install()
-          shutil.copy(path, 'chromedriver.exe')
-          print('chromedriver copiado para:', 'chromedriver.exe')
-          "
+          $version = "146.0.3856.62"
+          $url = "https://msedgedriver.azureedge.net/$version/edgedriver_win64.zip"
+          Invoke-WebRequest -Uri $url -OutFile edgedriver.zip
+          Expand-Archive -Path edgedriver.zip -DestinationPath . -Force
 
       - name: Gerar o .exe limpo e independente
-        run: >
-          pyinstaller
-          --onefile
-          --noconsole
-          --name "RoboFiscalizacao"
-          --collect-all selenium
-          --collect-all pdfplumber
-          robo_brave-v1.py
+        run: |
+          pyinstaller --onefile --noconsole --name "RoboFiscalizacao" --collect-all selenium --collect-all pdfplumber --add-data "msedgedriver.exe;." robo_brave-v1.py
 
       - name: Disponibilizar o .exe para download
         uses: actions/upload-artifact@v4
