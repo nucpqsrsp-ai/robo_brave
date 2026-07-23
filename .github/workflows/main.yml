@@ -25,12 +25,20 @@ jobs:
         run: |
           pip install pypdf selenium>=4.10.0 pyperclip pyinstaller pdfplumber
 
-      # Baixar o EdgeDriver (versão fixa compatível com o Edge corporativo)
+      # Detecta a versão do Edge instalado no runner (evita descompasso quando o Edge atualiza)
+      - name: Detectar versão do Edge instalado
+        shell: pwsh
+        run: |
+          $edgePath = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+          $edgeVersion = (Get-Item $edgePath).VersionInfo.ProductVersion
+          Write-Host "Versão do Edge detectada: $edgeVersion"
+          echo "EDGE_VERSION=$edgeVersion" >> $env:GITHUB_ENV
+
+      # Baixar o EdgeDriver na mesma versão do Edge detectado
       - name: Baixar o EdgeDriver
         shell: pwsh
         run: |
-          $version = "146.0.3856.62"
-          $url = "https://msedgedriver.azureedge.net/$version/edgedriver_win64.zip"
+          $url = "https://msedgedriver.azureedge.net/$env:EDGE_VERSION/edgedriver_win64.zip"
           Invoke-WebRequest -Uri $url -OutFile edgedriver.zip
           Expand-Archive -Path edgedriver.zip -DestinationPath . -Force
 
