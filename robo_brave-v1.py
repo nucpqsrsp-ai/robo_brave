@@ -1,8 +1,8 @@
 """
 ROBÔ DE AUTOMAÇÃO — PREENCHIMENTO DE FORMULÁRIOS DE FISCALIZAÇÃO
 =================================================================
-Sistema: AngularJS rodando em localhost:4444
-Automação: Selenium + ChromeDriver (Brave Browser)
+Sistema: AngularJS rodando em Edge (localhost:4444)
+Automação: Selenium + Edge WebDriver
 
 FLUXO POR PDF:
   1.  Lê e sanitiza os dados do PDF
@@ -21,17 +21,17 @@ FLUXO POR PDF:
   13. Repete para o próximo PDF
 
 PRÉ-REQUISITOS:
-  1. Abra o Brave com a flag de depuração remota usando o atalho:
-         "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe" --remote-debugging-port=9222
+  1. Abra o Edge com a flag de depuração remota usando o atalho:
+         msedge.exe --remote-debugging-port=9333
   2. Faça login no sistema manualmente
   3. Navegue até a tela da lista de CNPJs
   4. Rode este script:
-         python robo_automacao_v4.py
+         python robo_automacao_v3.py
      Ou para testar um PDF sem acionar o sistema:
-         python robo_automacao_v4.py testar caminho/formulario.pdf
+         python robo_automacao_v3.py testar caminho/formulario.pdf
 
 DEPENDÊNCIAS:
-  pip install pypdf selenium webdriver-manager pyperclip pdfplumber
+  pip install pypdf selenium webdriver-manager pyperclip
 """
 
 import re
@@ -46,12 +46,8 @@ from pypdf import PdfReader
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-
-# ── Alteração: imports trocados de Edge para Chrome (compatível com Brave) ──
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-# ────────────────────────────────────────────────────────────────────────────
-
+from selenium.webdriver.edge.options import Options
+from selenium.webdriver.edge.service import Service
 from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
@@ -70,13 +66,8 @@ CONFIG = {
     # URL base do sistema
     "url_base": "http://localhost:4444/#!/minhapagina/fiscalizacao",
 
-    # Porta de depuração remota (não altere)
-    "debug_port": "localhost:9222",
-
-    # ── Alteração: caminho do executável do Brave ──────────────────────────
-    # Se o Brave estiver instalado em outro local, ajuste este caminho.
-    "brave_path": r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-    # ────────────────────────────────────────────────────────────────────────
+    # Porta de depuração remota do Edge (deve bater com o atalho usado para abrir o Edge)
+    "debug_port": "localhost:9333",
 
     # Tempos de espera em segundos
     "espera_elemento":  10,    # timeout para localizar elementos
@@ -113,7 +104,7 @@ def ler_pdf(caminho_pdf: Path) -> dict:
     Retorna dicionário {nome_campo: valor}.
     Checkboxes são normalizados para True/False.
     Se o PDF não tiver campos detectáveis (salvo incorretamente),
-    usa OCR via pdfplumber como fallback automático.
+    usa OCR via Claude API como fallback automático.
     """
     reader = PdfReader(str(caminho_pdf))
     campos = {}
@@ -130,7 +121,7 @@ def ler_pdf(caminho_pdf: Path) -> dict:
             campos[nome] = valor
         log.info(f"  PDF lido: {len(campos)} campos encontrados")
     else:
-        log.warning(f"  PDF sem campos detectáveis — tentando OCR via pdfplumber...")
+        log.warning(f"  PDF sem campos detectáveis — tentando OCR via Claude API...")
         campos = ler_pdf_ocr(caminho_pdf)
         log.info(f"  OCR concluído: {len(campos)} campos extraídos")
 
@@ -139,7 +130,7 @@ def ler_pdf(caminho_pdf: Path) -> dict:
 
 def ler_pdf_ocr(caminho_pdf: Path) -> dict:
     """
-    Fallback para PDFs sem campos editáveis (salvos pelo navegador).
+    Fallback GRATUITO para PDFs sem campos editáveis (salvos pelo navegador).
     Usa pdfplumber para extrair texto com coordenadas precisas (x, y),
     emparelhando cada rótulo com o valor na linha imediatamente abaixo,
     dentro das bordas horizontais conhecidas do formulário.
@@ -150,6 +141,8 @@ def ler_pdf_ocr(caminho_pdf: Path) -> dict:
         log.error("  pdfplumber não instalado. Adicione nas dependências.")
         return {}
 
+    # Campos da página 1: (chave, top_do_rotulo, x0_inicio, x1_fim)
+    # Coordenadas baseadas no layout fixo do formulário
     CAMPOS_P1 = [
         ("cnpj",              38.4,   39.7,  220.0),
         ("nome_empresa",      38.4,  220.0,  600.0),
@@ -175,6 +168,14 @@ def ler_pdf_ocr(caminho_pdf: Path) -> dict:
         ("email",             761.2, 375.0,  600.0),
     ]
 
+    # Campos da página 2: checkboxes e textos livres
+    # Os checkboxes marcados aparecem como pequenos quadrados — detectamos
+    # pela presença de texto de valor nas linhas do embasamento
+    CAMPOS_P2_TEXTOS = [
+        ("emprego_quimicos",  None,   39.7,  600.0),  # top detectado dinamicamente
+        ("historico",         None,   39.7,  600.0),
+    ]
+
     campos = {
         "cnpj": "", "nome_empresa": "", "endereco_empresa": "",
         "sede_tipo": "", "aluguel_valor": "", "num_funcionarios": "",
@@ -188,6 +189,7 @@ def ler_pdf_ocr(caminho_pdf: Path) -> dict:
     }
 
     def extrair_campo(words, label_top, x0, x1, v_min=8, v_max=30):
+        """Extrai palavras na faixa vertical abaixo do rótulo e dentro dos limites x."""
         val = []
         for w in words:
             if label_top + v_min <= w['top'] <= label_top + v_max:
@@ -195,11 +197,18 @@ def ler_pdf_ocr(caminho_pdf: Path) -> dict:
                     val.append(w['text'])
         return " ".join(val).strip()
 
-    def encontrar_top_rotulo(words, texto_rotulo):
+    def encontrar_top_rotulo(words, texto_rotulo, tolerancia=5):
+        """
+        Encontra a coordenada top de um rótulo pelo texto.
+        Suporta rótulos compostos por múltiplas palavras na mesma linha.
+        """
         texto_lower = texto_rotulo.lower().strip()
+        # Tenta encontrar como palavra única primeiro
         for w in words:
             if texto_lower in w['text'].lower():
                 return w['top']
+        # Tenta montar o texto combinando palavras da mesma linha
+        from itertools import groupby
         linhas = {}
         for w in words:
             top_key = round(w['top'])
@@ -207,13 +216,15 @@ def ler_pdf_ocr(caminho_pdf: Path) -> dict:
                 linhas[top_key] = []
             linhas[top_key].append(w['text'])
         for top_key, palavras in linhas.items():
-            if texto_lower in " ".join(palavras).lower():
+            linha_texto = " ".join(palavras).lower()
+            if texto_lower in linha_texto:
                 return float(top_key)
         return None
 
     try:
         with pdfplumber.open(str(caminho_pdf)) as pdf:
 
+            # ── Página 1 ──────────────────────────────────────
             if len(pdf.pages) >= 1:
                 words1 = pdf.pages[0].extract_words(x_tolerance=3, y_tolerance=3)
                 for chave, top, x0, x1 in CAMPOS_P1:
@@ -221,9 +232,11 @@ def ler_pdf_ocr(caminho_pdf: Path) -> dict:
                     if val:
                         campos[chave] = val
 
+            # ── Página 2 ──────────────────────────────────────
             if len(pdf.pages) >= 2:
                 words2 = pdf.pages[1].extract_words(x_tolerance=3, y_tolerance=3)
 
+                # ── Localiza tops de todos os marcos da página 2 ─────────
                 top_eq   = encontrar_top_rotulo(words2, "Emprego dos produtos")
                 top_hist = encontrar_top_rotulo(words2, "Histórico")
 
@@ -237,6 +250,7 @@ def ler_pdf_ocr(caminho_pdf: Path) -> dict:
                     top_emb   = encontrar_top_rotulo(words2, f"Embasamento do Inciso {inciso}")
                     tops_incisos.append((inciso, chave_chk, chave_emb, top_bloco, top_emb))
 
+                # ── Extrai embasamento de cada inciso ────────────────────
                 IGNORAR_EMB = {
                     "embasamento", "do", "inciso", "iii", "v", "vi",
                     "(se", "aplicável)", "possui", "inciso?"
@@ -244,8 +258,16 @@ def ler_pdf_ocr(caminho_pdf: Path) -> dict:
                 for idx, (inciso, chave_chk, chave_emb, top_bloco, top_emb) in enumerate(tops_incisos):
                     if not top_emb:
                         continue
+
+                    # Limite inferior: topo do próximo bloco ou emprego
                     proximos = [tops_incisos[j][3] for j in range(idx+1, len(tops_incisos)) if tops_incisos[j][3]]
-                    limite_inf = proximos[0] - 2 if proximos else (top_eq - 2 if top_eq else top_emb + 150)
+                    if proximos:
+                        limite_inf = proximos[0] - 2
+                    elif top_eq:
+                        limite_inf = top_eq - 2
+                    else:
+                        limite_inf = top_emb + 150
+
                     emb_words = [
                         w['text'] for w in words2
                         if top_emb + 8 <= w['top'] < limite_inf
@@ -257,6 +279,7 @@ def ler_pdf_ocr(caminho_pdf: Path) -> dict:
                         campos[chave_chk] = True
                         campos[chave_emb] = emb_texto
 
+                # ── Emprego dos produtos químicos ─────────────────────────
                 if top_eq:
                     limite_inf_eq = (top_hist - 5) if top_hist and top_hist > top_eq else (top_eq + 80)
                     eq_words = [
@@ -270,6 +293,7 @@ def ler_pdf_ocr(caminho_pdf: Path) -> dict:
                     ]
                     campos["emprego_quimicos"] = " ".join(eq_words).strip()
 
+                # ── Histórico ─────────────────────────────────────────────
                 if top_hist:
                     hist_words = [
                         w['text'] for w in words2
@@ -287,11 +311,6 @@ def ler_pdf_ocr(caminho_pdf: Path) -> dict:
         log.error(f"  Falha na extração via pdfplumber: {e}")
 
     return campos
-
-
-# ─────────────────────────────────────────────────────────────
-# MÓDULO 2 — SANITIZAÇÃO
-# ─────────────────────────────────────────────────────────────
 def sanitizar_dados(dados: dict) -> dict:
     """
     Limpa os dados extraídos do PDF antes de enviar ao sistema.
@@ -302,6 +321,7 @@ def sanitizar_dados(dados: dict) -> dict:
     """
     dados_limpos = dict(dados)
 
+    # Apenas dígitos
     CAMPOS_SO_DIGITOS = [
         "num_funcionarios", "cpf", "cep",
         "numero", "telefone", "celular",
@@ -313,6 +333,7 @@ def sanitizar_dados(dados: dict) -> dict:
             log.warning(f"  Sanitizado [{campo}]: '{original}' → '{limpo}'")
         dados_limpos[campo] = limpo
 
+    # CNPJ
     cnpj_original = str(dados_limpos.get("cnpj", ""))
     cnpj_limpo = re.sub(r"\D", "", cnpj_original)
     if cnpj_limpo != cnpj_original and cnpj_original not in ("", "False"):
@@ -321,6 +342,7 @@ def sanitizar_dados(dados: dict) -> dict:
         log.warning(f"  CNPJ suspeito — {len(cnpj_limpo)} dígitos: '{cnpj_limpo}'")
     dados_limpos["cnpj"] = cnpj_limpo
 
+    # Campos monetários
     for campo in ["aluguel_valor", "faturamento_anual"]:
         original = str(dados_limpos.get(campo, ""))
         limpo = re.sub(r"[^\d,]", "", original.replace("R$", "").strip())
@@ -328,6 +350,7 @@ def sanitizar_dados(dados: dict) -> dict:
             log.warning(f"  Sanitizado [{campo}]: '{original}' → '{limpo}'")
         dados_limpos[campo] = limpo
 
+    # Strip em campos de texto
     CAMPOS_TEXTO = [
         "nome_completo", "identidade", "orgao_emissor", "cargo",
         "endereco_empresa", "endereco", "complemento", "bairro",
@@ -340,6 +363,7 @@ def sanitizar_dados(dados: dict) -> dict:
         if isinstance(valor, str):
             dados_limpos[campo] = valor.strip()
 
+    # UF e Município sempre em maiúsculas
     for campo in ["uf", "municipio"]:
         valor = dados_limpos.get(campo)
         if isinstance(valor, str):
@@ -349,42 +373,38 @@ def sanitizar_dados(dados: dict) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────
-# MÓDULO 3 — CONEXÃO COM O BRAVE
+# MÓDULO 3 — CONEXÃO COM O EDGE
 # ─────────────────────────────────────────────────────────────
-def conectar_brave() -> webdriver.Chrome:
-    import subprocess
-    from webdriver_manager.chrome import ChromeDriverManager
-    from webdriver_manager.core.os_manager import ChromeType
+def conectar_edge() -> webdriver.Edge:
+    """
+    Conecta ao Edge já aberto com --remote-debugging-port=9333.
+    Usa o EdgeDriver embutido no executável (sem baixar da internet).
+    """
+    import os, sys
 
-    options = Options()
+    options = webdriver.EdgeOptions()
     options.add_experimental_option("debuggerAddress", CONFIG["debug_port"])
-    options.binary_location = CONFIG["brave_path"]
 
-    # Detecta a versão do Brave instalada na máquina
-    try:
-        resultado = subprocess.run(
-            [CONFIG["brave_path"], "--version"],
-            capture_output=True, text=True, timeout=5
-        )
-        versao = resultado.stdout.strip()
-        log.info(f"Brave detectado: {versao}")
-    except Exception:
-        log.warning("Não foi possível detectar a versão do Brave — usando chromedriver padrão.")
+    # Localiza o EdgeDriver embutido pelo PyInstaller
+    if getattr(sys, "frozen", False):
+        # Rodando como .exe — driver está na pasta temporária do PyInstaller
+        base = sys._MEIPASS
+    else:
+        # Rodando como script Python normal
+        base = os.path.dirname(os.path.abspath(__file__))
 
-    # Baixa o chromedriver compatível automaticamente
+    driver_path = os.path.join(base, "msedgedriver.exe")
+
     try:
-        service = Service(
-            ChromeDriverManager(chrome_type=ChromeType.BRAVE).install()
-        )
-        driver = webdriver.Chrome(service=service, options=options)
-        log.info("Conectado ao Brave com sucesso.")
+        service = Service(driver_path)
+        driver = webdriver.Edge(options=options)
+        log.info("Conectado ao Edge com sucesso.")
         return driver
     except Exception as e:
-        log.error(f"Não foi possível conectar ao Brave: {e}")
+        log.error(f"Não foi possível conectar ao Edge: {e}")
         log.error(
-            "Certifique-se de que o Brave foi aberto com o atalho:\n"
-            '  "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"'
-            " --remote-debugging-port=9222\n"
+            "Certifique-se de que o Edge foi aberto com o atalho:\n"
+            "  msedge.exe --remote-debugging-port=9333\n"
             "e que você fez login no sistema."
         )
         raise
@@ -408,11 +428,12 @@ def esperar_clicavel(driver, by, seletor, timeout=None) -> object:
 
 def colar(driver, elemento, texto: str):
     """
-    Cola um texto em um elemento usando clipboard.
+    Cola um texto em um elemento usando JavaScript.
     Mais confiável que send_keys para textos longos com acentos.
     """
     if not texto:
         return
+    # Limpa o campo e cola via clipboard
     elemento.click()
     driver.execute_script("arguments[0].value = '';", elemento)
     pyperclip.copy(str(texto))
@@ -423,10 +444,18 @@ def colar(driver, elemento, texto: str):
 def preencher_por_label(driver, texto_label: str, valor: str):
     """
     Localiza um input/textarea pelo texto do label associado e preenche.
-    Usado para campos com id dinâmico.
+    Usado para campos com id dinâmico (undefined_inputNumerico).
     """
     if not valor:
         return
+    # Encontra o form-group que contém o label com o texto
+    xpath = (
+        f"//div[contains(@class,'form-group')]"
+        f"[.//label[contains(normalize-space(.),'{ texto_label}')]]"
+        f"//input | //div[contains(@class,'form-group')]"
+        f"[.//label[contains(normalize-space(),'{texto_label}')]]"
+        f"//textarea"
+    )
     try:
         campo = esperar(driver, By.XPATH,
                         f"//div[contains(@class,'form-group')]"
@@ -443,7 +472,10 @@ def preencher_por_label(driver, texto_label: str, valor: str):
 # MÓDULO 4 — NAVEGAÇÃO E PREENCHIMENTO
 # ─────────────────────────────────────────────────────────────
 def aguardar_sem_overlay(driver, timeout=20):
-    """Aguarda o overlay de carregamento desaparecer."""
+    """
+    Aguarda o overlay de carregamento (block-ui-overlay) desaparecer.
+    Se não sumir no tempo limite, remove via JavaScript.
+    """
     try:
         WebDriverWait(driver, timeout).until(
             EC.invisibility_of_element_located(
@@ -468,20 +500,24 @@ def localizar_cnpj_e_gerenciar(driver, cnpj: str) -> bool:
     """
     Percorre a lista de CNPJs, localiza o correspondente ao PDF
     e clica em "Gerenciar Fiscalização".
+    Retorna True se encontrado.
     """
     log.info(f"  Procurando CNPJ {cnpj} na lista...")
 
+    # Formata o CNPJ no padrão exibido na tela: XX.XXX.XXX/XXXX-XX
     cnpj_fmt = (
         f"{cnpj[:2]}.{cnpj[2:5]}.{cnpj[5:8]}"
         f"/{cnpj[8:12]}-{cnpj[12:14]}"
     )
 
     try:
+        # Localiza a célula com o CNPJ
         celula = esperar(
             driver, By.XPATH,
             f"//td[contains(@class,'ng-binding') and "
             f"normalize-space(text())='{cnpj_fmt}']"
         )
+        # Sobe para a linha (<tr>) e clica no botão "Gerenciar Fiscalização"
         linha = celula.find_element(By.XPATH, "./ancestor::tr")
         btn_gerenciar = linha.find_element(
             By.XPATH,
@@ -489,12 +525,14 @@ def localizar_cnpj_e_gerenciar(driver, cnpj: str) -> bool:
             ".//a[@uib-tooltip='Gerenciar Fiscalização']"
         )
 
+        # Aguarda overlay desaparecer, rola até o botão e usa JS como padrão
         aguardar_sem_overlay(driver)
         driver.execute_script(
             "arguments[0].scrollIntoView({block:'center'});", btn_gerenciar
         )
         time.sleep(CONFIG["espera_curta"])
 
+        # Tenta clique normal; se bloqueado, usa JS diretamente
         try:
             btn_gerenciar.click()
         except Exception:
@@ -552,6 +590,8 @@ def preencher_sede(driver, dados: dict):
         radio.click()
 
     time.sleep(CONFIG["espera_curta"])
+
+    # Funcionários e faturamento
     preencher_por_label(driver, "Nº de funcionários",
                         dados.get("num_funcionarios", ""))
     preencher_por_label(driver, "Faturamento Anual Bruto",
@@ -603,8 +643,10 @@ def preencher_dados_pessoais(driver, dados: dict):
     preencher_id("identidade",  dados.get("identidade", ""))
     preencher_id("cargo",       dados.get("cargo", ""))
     preencher_por_label(driver, "CEP", dados.get("cep", ""))
-    time.sleep(CONFIG["espera_media"])
+    time.sleep(CONFIG["espera_media"])  # aguarda auto-completar CEP
     preencher_id("endereco",    dados.get("endereco", ""))
+
+    # Número e Complemento — mesmo id "endereco", usar ng-model
     preencher_ng(
         "$ctrl.representanteFuncionarioAuto.endereco.numero",
         dados.get("numero", "")
@@ -613,8 +655,10 @@ def preencher_dados_pessoais(driver, dados: dict):
         "$ctrl.representanteFuncionarioAuto.endereco.complementar",
         dados.get("complemento", "") or ""
     )
+
     preencher_id("bairro",      dados.get("bairro", ""))
 
+    # UF — select
     try:
         uf_select = Select(esperar_clicavel(driver, By.ID, "uf"))
         uf_select.select_by_value(str(dados.get("uf", "")).upper())
@@ -622,6 +666,7 @@ def preencher_dados_pessoais(driver, dados: dict):
     except Exception:
         log.warning("  Dropdown UF não encontrado ou valor inválido.")
 
+    # Município — select
     try:
         mun_select = Select(esperar_clicavel(driver, By.ID, "municipio"))
         mun_select.select_by_visible_text(str(dados.get("municipio", "")))
@@ -642,9 +687,11 @@ def preencher_incisos(driver, dados: dict):
       c) Seleciona "Nota Fiscal" no dropdown "Tipo"
       d) Cola a descrição no campo "Descrição"
       e) Clica em "Incluir"
+    Ignora incisos não marcados no PDF.
     """
     log.info("  Verificando incisos...")
 
+    # Mapeamento: código → texto exato no dropdown "Dispositivo Legal"
     INCISOS = [
         ("iii", "III", "Inciso III"),
         ("v",   "V",   "Inciso V"),
@@ -659,6 +706,7 @@ def preencher_incisos(driver, dados: dict):
             log.info(f"  Inciso {rotulo}: não marcado, pulando.")
             continue
 
+        # Verifica se há botões de embasamento visíveis na página
         botoes_emb = driver.find_elements(
             By.XPATH,
             "//button[@uib-tooltip='Editar/Adicionar embasamento']"
@@ -673,9 +721,13 @@ def preencher_incisos(driver, dados: dict):
             continue
 
         log.info(f"  Preenchendo Inciso {rotulo}...")
+
+        # a) Clica em "Editar/Adicionar embasamento"
         botoes_emb[idx].click()
         time.sleep(CONFIG["espera_longa"])
 
+        # b) Seleciona o inciso no dropdown "Dispositivo Legal"
+        # ng-model="$ctrl.infracao.inciso" — opções via ng-repeat com texto visível
         try:
             select_disp = Select(esperar_clicavel(
                 driver, By.XPATH,
@@ -687,6 +739,7 @@ def preencher_incisos(driver, dados: dict):
         except Exception as e:
             log.warning(f"  Dropdown 'Dispositivo Legal' não encontrado para Inciso {rotulo}: {e}")
 
+        # c) Seleciona "Nota Fiscal" no dropdown "Tipo"
         try:
             select_tipo = Select(esperar_clicavel(
                 driver, By.XPATH,
@@ -698,6 +751,7 @@ def preencher_incisos(driver, dados: dict):
         except Exception as e:
             log.warning(f"  Dropdown 'Tipo' não encontrado para Inciso {rotulo}: {e}")
 
+        # d) Cola a descrição no campo "Descrição"
         try:
             campo_desc = esperar_clicavel(
                 driver, By.XPATH,
@@ -710,6 +764,7 @@ def preencher_incisos(driver, dados: dict):
         except Exception as e:
             log.warning(f"  Campo 'Descrição' não encontrado para Inciso {rotulo}: {e}")
 
+        # e) Clica em "Incluir"
         try:
             btn_incluir = esperar_clicavel(
                 driver, By.XPATH,
@@ -753,6 +808,7 @@ def marcar_apreensao_e_recusa(driver):
     """Marca 'Não Houve' em Apreensão e 'Não' em Recusa."""
     log.info("  Marcando Apreensão e Recusa...")
 
+    # Apreensão — checkbox "Não Houve"
     try:
         chk = esperar_clicavel(
             driver, By.XPATH,
@@ -765,6 +821,7 @@ def marcar_apreensao_e_recusa(driver):
     except TimeoutException:
         log.warning("  Checkbox 'Não Houve Apreensão' não encontrado.")
 
+    # Recusa — radio "Não"
     try:
         radio = esperar_clicavel(driver, By.ID, "recusaAssinaturaNao")
         radio.click()
@@ -792,6 +849,7 @@ def salvar_e_voltar(driver):
     log.info("  Voltando à lista...")
     aguardar_sem_overlay(driver)
 
+    # Tenta clicar em Voltar até 3 vezes com esperas progressivas
     for tentativa in range(1, 4):
         try:
             btn_voltar = esperar_clicavel(driver, By.ID, "voltar", timeout=10)
@@ -801,16 +859,19 @@ def salvar_e_voltar(driver):
                 clicar_js(driver, btn_voltar)
             time.sleep(CONFIG["espera_longa"])
 
+            # Verifica se voltou à lista de CNPJs pela URL
             url_atual = driver.current_url
             if "fiscalizacao" in url_atual and "gerenciar" not in url_atual:
                 log.info("  Voltou à lista com sucesso.")
                 return
+            # Se ainda estiver na tela errada, aguarda mais
             time.sleep(CONFIG["espera_longa"] * tentativa)
 
         except Exception as e:
             log.warning(f"  Tentativa {tentativa} de Voltar falhou: {e}")
             time.sleep(CONFIG["espera_longa"] * tentativa)
 
+    # Último recurso: navega diretamente para a lista
     log.warning("  Navegando diretamente para a lista de CNPJs...")
     driver.get(CONFIG["url_base"])
     time.sleep(CONFIG["espera_longa"])
@@ -820,13 +881,18 @@ def salvar_e_voltar(driver):
 # MÓDULO 5 — ORQUESTRADOR PRINCIPAL
 # ─────────────────────────────────────────────────────────────
 def selecionar_pdfs() -> list:
-    """Abre o explorador de arquivos para seleção dos PDFs."""
+    """
+    Abre o explorador de arquivos do Windows para o usuário
+    selecionar um ou mais PDFs. Retorna lista de Path.
+    Permite selecionar arquivos de qualquer pasta.
+    """
     import tkinter as tk
-    from tkinter import filedialog
+    from tkinter import filedialog, messagebox
 
+    # Janela raiz oculta (necessária para o filedialog)
     root = tk.Tk()
     root.withdraw()
-    root.attributes("-topmost", True)
+    root.attributes("-topmost", True)   # garante que abre na frente
 
     arquivos = filedialog.askopenfilenames(
         title="Selecione os formulários PDF para processar",
@@ -835,11 +901,19 @@ def selecionar_pdfs() -> list:
     )
 
     root.destroy()
-    return [Path(a) for a in arquivos] if arquivos else []
+
+    if not arquivos:
+        return []
+
+    pdfs = [Path(a) for a in arquivos]
+    return pdfs
 
 
 def criar_janela_progresso(total: int):
-    """Cria e retorna uma janela tkinter de progresso."""
+    """
+    Cria e retorna uma janela tkinter de progresso.
+    Retorna (root, label_status, label_contador, barra).
+    """
     import tkinter as tk
     from tkinter import ttk
 
@@ -849,6 +923,7 @@ def criar_janela_progresso(total: int):
     root.resizable(False, False)
     root.attributes("-topmost", True)
 
+    # Centraliza na tela
     root.update_idletasks()
     x = (root.winfo_screenwidth()  - 420) // 2
     y = (root.winfo_screenheight() - 130) // 2
@@ -882,12 +957,16 @@ def atualizar_progresso(root, label_status, label_contador, barra, atual, total,
 
 def processar_lote():
     """
-    Fluxo principal: seleciona PDFs, conecta ao Brave e processa o lote.
+    Abre o explorador de arquivos para seleção dos PDFs,
+    cria as subpastas "PDFs concluidos" e "PDFs com erro" no mesmo
+    diretório dos arquivos selecionados, exibe janela de progresso
+    e popup ao concluir.
     """
     import shutil
     import tkinter as tk
     from tkinter import messagebox
 
+    # Abre o explorador de arquivos
     log.info("Aguardando seleção dos PDFs...")
     pdfs = selecionar_pdfs()
 
@@ -895,6 +974,7 @@ def processar_lote():
         log.warning("Nenhum PDF selecionado. Encerrando.")
         return
 
+    # Cria subpastas no mesmo diretório dos PDFs selecionados
     pasta_origem     = pdfs[0].parent
     pasta_concluidos = pasta_origem / "PDFs concluidos"
     pasta_erros      = pasta_origem / "PDFs com erro"
@@ -906,16 +986,15 @@ def processar_lote():
     log.info(f"PDFs concluidos em: {pasta_concluidos}")
     log.info(f"PDFs com erro em:   {pasta_erros}")
 
-    total = len(pdfs)
+    total   = len(pdfs)
     log.info("=" * 60)
     log.info(f"Iniciando lote: {total} PDF(s)")
     log.info("=" * 60)
 
+    # Janela de progresso
     root_prog, lbl_status, lbl_contador, barra = criar_janela_progresso(total)
 
-    # ── Alteração: chama conectar_brave() em vez de conectar_edge() ─────────
-    driver  = conectar_brave()
-    # ─────────────────────────────────────────────────────────────────────────
+    driver  = conectar_edge()
     sucesso = 0
     falha   = 0
 
@@ -925,6 +1004,7 @@ def processar_lote():
                             barra, i - 1, total, pdf.name)
 
         try:
+            # 1. Ler e sanitizar dados do PDF
             dados = ler_pdf(pdf)
             log.info("  Sanitizando dados...")
             dados = sanitizar_dados(dados)
@@ -935,22 +1015,40 @@ def processar_lote():
             if len(cnpj) != 14:
                 raise ValueError(f"CNPJ inválido ({len(cnpj)} dígitos): '{cnpj}'")
 
+            # Garante que está na tela da lista de CNPJs
             driver.get(CONFIG["url_base"])
             time.sleep(CONFIG["espera_longa"])
 
+            # 2. Localizar CNPJ e clicar em Gerenciar Fiscalização
             if not localizar_cnpj_e_gerenciar(driver, cnpj):
                 raise ValueError(f"CNPJ {cnpj} não encontrado na lista.")
 
+            # 3. Clicar em Auto de Fiscalização
             clicar_auto_fiscalizacao(driver)
+
+            # 4. Marcar Equipes
             marcar_equipes(driver)
+
+            # 5. Preencher sede, funcionários, faturamento
             preencher_sede(driver, dados)
+
+            # 6. Selecionar OUTRO COLABORADOR e preencher dados pessoais
             selecionar_outro_colaborador(driver)
             preencher_dados_pessoais(driver, dados)
+
+            # 7. Preencher incisos (somente os marcados no PDF)
             preencher_incisos(driver, dados)
+
+            # 8. Preencher campos técnicos
             preencher_campos_tecnicos(driver, dados)
+
+            # 9. Marcar Apreensão e Recusa
             marcar_apreensao_e_recusa(driver)
+
+            # 10. Salvar e voltar
             salvar_e_voltar(driver)
 
+            # 11. Mover PDF para concluídos
             shutil.move(str(pdf), str(pasta_concluidos / pdf.name))
             log.info(f"  ✅ Concluído: {pdf.name}")
             sucesso += 1
@@ -965,6 +1063,7 @@ def processar_lote():
             except Exception:
                 pass
 
+    # Atualiza barra para 100%
     atualizar_progresso(root_prog, lbl_status, lbl_contador,
                         barra, total, total, "Concluído!")
     root_prog.destroy()
@@ -974,6 +1073,8 @@ def processar_lote():
     log.info(f"Log: {log_path}")
     log.info("=" * 60)
 
+    # Popup de conclusão
+    icone = "OK" if falha == 0 else "ATENCAO"
     msg = (
         f"Lote concluido!\n\n"
         f"Processados com sucesso: {sucesso}\n"
@@ -993,7 +1094,7 @@ def processar_lote():
 def testar_pdf(caminho: str):
     """
     Testa leitura e sanitização de um PDF sem acionar o sistema.
-    Uso: python robo_automacao_v4.py testar caminho/formulario.pdf
+    Uso: python robo_automacao_v3.py testar caminho/formulario.pdf
     """
     pdf = Path(caminho)
     if not pdf.exists():
